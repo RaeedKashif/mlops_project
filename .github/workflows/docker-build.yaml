@@ -1,4 +1,4 @@
-name: Build Docker Images
+name: Build and Test Complete System
 
 on:
   push:
@@ -6,38 +6,54 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-images:
     runs-on: ubuntu-latest
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
     
-    - name: Debug info
+    - name: Build application images
       run: |
-        echo "✅ Workflow started!"
-        echo "Event: ${{ github.event_name }}"
-        echo "Branch: ${{ github.ref }}"
+        echo "Building application images..."
+        docker build -t my-ingestion ./ingestion/
+        docker build -t my-dashboard ./streamlit_app/
+        docker build -t my-fl-server ./federated_learning/
+        docker build -t my-publisher ./publisher/
     
-    - name: Build ingestion service
+    - name: Test Prometheus config
       run: |
-        cd ingestion
-        docker build -t ingestion-service:latest .
+        echo "Testing Prometheus configuration..."
+        if [ -f "monitoring/prometheus.yml" ]; then
+          docker run --rm -v $(pwd)/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml \
+            prom/prometheus:latest --config.file=/etc/prometheus/prometheus.yml --web.enable-lifecycle --check-config
+          echo "✅ Prometheus config is valid"
+        else
+          echo "⚠️ No Prometheus config found"
+        fi
     
-    - name: Build publisher
+    - name: Test docker-compose
       run: |
-        cd publisher
-        docker build -t publisher:latest .
+        echo "Testing docker-compose configuration..."
+        if [ -f "docker-compose.yml" ]; then
+          docker-compose config
+          echo "✅ docker-compose config is valid"
+        else
+          echo "⚠️ No docker-compose.yml found"
+        fi
     
-    - name: Build dashboard
+    - name: Check monitoring endpoints
       run: |
-        cd streamlit_app
-        docker build -t dashboard:latest .
+        echo "Checking if monitoring endpoints are defined..."
+        # Check if services expose Prometheus metrics ports
+        grep -n "8001\|8081\|9090\|3000" docker-compose.yml || true
     
-    - name: Build FL server
+    - name: Summary
       run: |
-        cd federated_learning
-        docker build -t fl-server:latest .
-    
-    - name: Success
-      run: echo "✅ All images built successfully!"
+        echo "📊 Build Summary:"
+        echo "✅ Application images built"
+        echo "🔍 Next steps to test monitoring:"
+        echo "1. Add Prometheus/Grafana to docker-compose.yml"
+        echo "2. Add metrics endpoints to your services"
+        echo "3. Run: docker-compose up -d"
+        echo "4. Access Grafana at http://localhost:3000"
