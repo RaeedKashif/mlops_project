@@ -1,8 +1,125 @@
-# docker-compose.yml - UPDATED VERSION
 version: '3.8'
 
 services:
-  # Monitoring Stack - NEW
+  # MQTT Broker
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: mqtt_broker
+    restart: always
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mosq_data:/mosquitto/data
+      - mosq_logs:/mosquitto/log
+
+  # Data Publisher
+  publisher:
+    build:
+      context: ./publisher
+      dockerfile: Dockerfile
+    container_name: mqtt_publisher
+    restart: always
+    depends_on:
+      - mosquitto
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      RATE: 2
+    volumes:
+      - ./data:/app/data
+
+  # Ingestion API (with Prometheus metrics on port 8001)
+  ingestion_api:
+    build:
+      context: ./ingestion
+      dockerfile: Dockerfile
+    container_name: ingestion_api
+    restart: always
+    ports:
+      - "8000:8000"
+      - "8001:8001"  # Prometheus metrics endpoint
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      DB_PATH: /app/db/events.db
+      PROMETHEUS_PORT: 8001
+    volumes:
+      - ./ingestion/db:/app/db
+    depends_on:
+      - mosquitto
+
+  # Streamlit Dashboard
+  streamlit:
+    build:
+      context: ./streamlit_app
+      dockerfile: Dockerfile
+    container_name: streamlit_app
+    ports:
+      - "8501:8501"
+    environment:
+      DB_PATH: /app/db/events.db
+    volumes:
+      - ./streamlit_app/streamlit_app.py:/app/streamlit_app.py
+      - ./ingestion/db:/app/db
+    depends_on:
+      - ingestion_api
+
+  # Federated Learning Server (with Prometheus metrics on port 8081)
+  fl_server:
+    build:
+      context: ./federated_learning
+      dockerfile: Dockerfile
+    container_name: fl_server
+    ports:
+      - "8080:8080"
+      - "8081:8081"  # Prometheus metrics endpoint
+    environment:
+      DB_PATH: /app/db/events.db
+      MIN_CLIENTS: 2
+      NUM_ROUNDS: 10
+      PROMETHEUS_PORT: 8081
+    volumes:
+      - ./ingestion/db:/app/db
+      - ./federated_learning/models:/app/models
+    depends_on:
+      - ingestion_api
+
+  # Federated Learning Clients
+  fl_client_hospital_a:
+    build:
+      context: ./federated_learning
+      dockerfile: Dockerfile
+    container_name: fl_client_a
+    environment:
+      DB_PATH: /app/db/events.db
+      CLIENT_ID: hospital_A
+      SERVER_ADDRESS: fl_server:8080
+      PROMETHEUS_PORT: 8082
+    volumes:
+      - ./ingestion/db:/app/db
+    depends_on:
+      - fl_server
+      - ingestion_api
+
+  fl_client_hospital_b:
+    build:
+      context: ./federated_learning
+      dockerfile: Dockerfile
+    container_name: fl_client_b
+    environment:
+      DB_PATH: /app/db/events.db
+      CLIENT_ID: hospital_B
+      SERVER_ADDRESS: fl_server:8080
+      PROMETHEUS_PORT: 8083
+    volumes:
+      - ./ingestion/db:/app/db
+    depends_on:
+      - fl_server
+      - ingestion_api
+
+  # Monitoring Services
   prometheus:
     image: prom/prometheus:latest
     container_name: prometheus
@@ -15,13 +132,10 @@ services:
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/etc/prometheus/console_libraries'
-      - '--web.console.templates=/etc/prometheus/consoles'
-      - '--storage.tsdb.retention.time=200h'
       - '--web.enable-lifecycle'
-    networks:
-      - monitoring
-      - iot-network
+    depends_on:
+      - ingestion_api
+      - fl_server
 
   grafana:
     image: grafana/grafana:latest
@@ -36,9 +150,6 @@ services:
     volumes:
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
       - grafana_data:/var/lib/grafana
-    networks:
-      - monitoring
-      - iot-network
     depends_on:
       - prometheus
 
@@ -48,8 +159,6 @@ services:
     restart: unless-stopped
     ports:
       - "9100:9100"
-    networks:
-      - monitoring
     command:
       - '--path.rootfs=/host'
       - '--path.procfs=/host/proc'
@@ -58,142 +167,6 @@ services:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /:/rootfs:ro
-
-  # Existing services (UPDATED with monitoring)
-  mosquitto:
-    image: eclipse-mosquitto:2.0
-    container_name: mqtt_broker
-    restart: always
-    ports:
-      - "1883:1883"
-      - "9001:9001"
-    volumes:
-      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
-      - mosq_data:/mosquitto/data
-      - mosq_logs:/mosquitto/log
-    networks:
-      - iot-network
-      - monitoring
-
-  ingestion_api:
-    build:
-      context: ./ingestion
-      dockerfile: Dockerfile
-    container_name: ingestion_api
-    restart: always
-    ports:
-      - "8000:8000"
-      - "8001:8001"  # Prometheus metrics endpoint
-    environment:
-      - MQTT_HOST=mosquitto
-      - MQTT_PORT=1883
-      - DB_PATH=/app/db/events.db
-      - PROMETHEUS_PORT=8001
-    volumes:
-      - ./ingestion/db:/app/db
-    networks:
-      - iot-network
-      - monitoring
-    depends_on:
-      - mosquitto
-
-  publisher:
-    build:
-      context: ./publisher
-      dockerfile: Dockerfile
-    container_name: mqtt_publisher
-    restart: always
-    environment:
-      - MQTT_HOST=mosquitto
-      - MQTT_PORT=1883
-      - RATE=2
-    volumes:
-      - ./data:/app/data
-    networks:
-      - iot-network
-      - monitoring
-    depends_on:
-      - mosquitto
-      - ingestion_api
-
-  streamlit:
-    build:
-      context: ./streamlit_app
-      dockerfile: Dockerfile
-    container_name: streamlit_app
-    ports:
-      - "8501:8501"
-    environment:
-      - DB_PATH=/app/db/events.db
-    volumes:
-      - ./streamlit_app/streamlit_app.py:/app/streamlit_app.py
-      - ./ingestion/db:/app/db
-    networks:
-      - iot-network
-      - monitoring
-    depends_on:
-      - ingestion_api
-
-  fl_server:
-    build:
-      context: ./federated_learning
-      dockerfile: Dockerfile
-    container_name: fl_server
-    ports:
-      - "8080:8080"
-      - "8081:8081"  # Prometheus metrics endpoint
-    environment:
-      - DB_PATH=/app/db/events.db
-      - MIN_CLIENTS=2
-      - NUM_ROUNDS=10
-      - PROMETHEUS_PORT=8081
-    volumes:
-      - ./ingestion/db:/app/db
-      - ./federated_learning/models:/app/models
-    networks:
-      - iot-network
-      - monitoring
-    command: python server.py
-
-  fl_client_hospital_a:
-    build:
-      context: ./federated_learning
-      dockerfile: Dockerfile
-    container_name: fl_client_a
-    environment:
-      - DB_PATH=/app/db/events.db
-      - CLIENT_ID=hospital_A
-      - SERVER_ADDRESS=fl_server:8080
-      - PROMETHEUS_PORT=8082
-    volumes:
-      - ./ingestion/db:/app/db
-    networks:
-      - iot-network
-      - monitoring
-    command: python client.py
-    depends_on:
-      - fl_server
-      - ingestion_api
-
-  fl_client_hospital_b:
-    build:
-      context: ./federated_learning
-      dockerfile: Dockerfile
-    container_name: fl_client_b
-    environment:
-      - DB_PATH=/app/db/events.db
-      - CLIENT_ID=hospital_B
-      - SERVER_ADDRESS=fl_server:8080
-      - PROMETHEUS_PORT=8083
-    volumes:
-      - ./ingestion/db:/app/db
-    networks:
-      - iot-network
-      - monitoring
-    command: python client.py
-    depends_on:
-      - fl_server
-      - ingestion_api
 
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:latest
@@ -207,32 +180,9 @@ services:
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
       - /dev/disk/:/dev/disk:ro
-    networks:
-      - monitoring
-
-networks:
-  iot-network:
-    driver: bridge
-  monitoring:
-    driver: bridge
 
 volumes:
   mosq_data:
   mosq_logs:
   prometheus_data:
   grafana_data:
-  cadvisor_data:
-
-mqtt-bridge:
-  image: telegraf:latest
-  container_name: mqtt-bridge
-  restart: unless-stopped
-  ports:
-    - "9273:9273"
-  volumes:
-    - ./monitoring/telegraf.conf:/etc/telegraf/telegraf.conf
-  networks:
-    - monitoring
-    - iot-network
-  depends_on:
-    - mosquitto
