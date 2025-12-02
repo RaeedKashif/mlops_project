@@ -2,10 +2,9 @@ name: Build and Push Docker Images
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main]
   pull_request:
-    branches: [ main, master ]
-  workflow_dispatch:  # Allow manual triggers
+    branches: [ main]
 
 env:
   DOCKER_REGISTRY: docker.io
