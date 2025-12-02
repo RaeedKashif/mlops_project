@@ -1,0 +1,86 @@
+# monitoring/alert.rules.yml
+groups:
+  - name: iot_system_alerts
+    rules:
+      # System alerts
+      - alert: HighCPUUsage
+        expr: 100 - (avg by(instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage on {{ $labels.instance }}"
+          description: "CPU usage is above 80% for 5 minutes"
+
+      - alert: HighMemoryUsage
+        expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage on {{ $labels.instance }}"
+          description: "Memory usage is above 85% for 5 minutes"
+
+      # IoT Specific alerts
+      - alert: NoHeartData
+        expr: increase(ingestion_events_total{type="heart"}[5m]) == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No heart data received for 10 minutes"
+          description: "Heart sensor data flow has stopped"
+
+      - alert: HighHeartRate
+        expr: ingestion_heart_rate > 120
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High heart rate detected: {{ $value }} BPM"
+          description: "Patient heart rate exceeds 120 BPM for 2 minutes"
+
+      - alert: LowTemperature
+        expr: ingestion_temperature < 32
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low temperature alert: {{ $value }}°F"
+          description: "Temperature below freezing point"
+
+      - alert: MQTTConnectionDown
+        expr: mqtt_connected == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MQTT broker connection lost"
+          description: "Cannot connect to MQTT broker"
+
+      - alert: DatabaseErrorRateHigh
+        expr: rate(ingestion_db_errors_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High database error rate"
+          description: "Database errors occurring at rate {{ $value }}"
+
+      - alert: FederatedLearningStalled
+        expr: fl_training_round == fl_training_round offset 5m
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Federated learning training stalled"
+          description: "No progress in federated learning for 10 minutes"
+
+      - alert: ModelAccuracyLow
+        expr: fl_model_accuracy < 0.7
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low model accuracy: {{ $value }}"
+          description: "Federated learning model accuracy below 70%"
