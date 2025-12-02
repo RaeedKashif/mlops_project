@@ -1,0 +1,128 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: mqtt_broker
+    restart: always
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mosq_data:/mosquitto/data
+      - mosq_logs:/mosquitto/log
+
+  publisher:
+    build:
+      context: ./publisher
+      dockerfile: Dockerfile
+    container_name: mqtt_publisher
+    restart: always
+    depends_on:
+      - mosquitto
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      RATE: 2
+    volumes:
+      - ./data:/app/data
+
+  ingestion_api:
+    build:
+      context: ./ingestion
+      dockerfile: Dockerfile
+    container_name: ingestion_api
+    restart: always
+    depends_on:
+      - mosquitto
+    ports:
+      - "8000:8000"
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      DB_PATH: /app/db/events.db
+    volumes:
+      - ./ingestion/db:/app/db
+
+  streamlit:
+    build:
+      context: ./streamlit_app
+      dockerfile: Dockerfile
+    container_name: streamlit_app
+    volumes:
+      - ./streamlit_app/streamlit_app.py:/app/streamlit_app.py
+      - ./ingestion/db:/app/db
+    working_dir: /app
+    environment:
+      DB_PATH: /app/db/events.db
+    ports:
+      - "8501:8501"
+    depends_on:
+      - ingestion_api
+
+  fl_server:
+    build:
+      context: ./federated_learning
+      dockerfile: Dockerfile
+    container_name: fl_server
+    ports:
+      - "8080:8080"
+    environment:
+      DB_PATH: /app/db/events.db
+      MIN_CLIENTS: 2
+      NUM_ROUNDS: 10
+    volumes:
+      - ./ingestion/db:/app/db
+      - ./federated_learning/models:/app/models
+    command: python server.py
+
+  fl_client_hospital_a:
+    build:
+      context: ./federated_learning
+      dockerfile: Dockerfile
+    container_name: fl_client_a
+    environment:
+      DB_PATH: /app/db/events.db
+      CLIENT_ID: hospital_A
+      SERVER_ADDRESS: fl_server:8080
+    volumes:
+      - ./ingestion/db:/app/db
+    command: python client.py
+    depends_on:
+      - fl_server
+      - ingestion_api
+
+  fl_client_hospital_b:
+    build:
+      context: ./federated_learning
+      dockerfile: Dockerfile
+    container_name: fl_client_b
+    environment:
+      DB_PATH: /app/db/events.db
+      CLIENT_ID: hospital_B
+      SERVER_ADDRESS: fl_server:8080
+    volumes:
+      - ./ingestion/db:/app/db
+    command: python client.py
+    depends_on:
+      - fl_server
+      - ingestion_api
+
+  fl_client_continent_asia:
+    build:
+      context: ./federated_learning
+      dockerfile: Dockerfile
+    container_name: fl_client_asia
+    environment:
+      DB_PATH: /app/db/events.db
+      CLIENT_ID: continent_asia
+      SERVER_ADDRESS: fl_server:8080
+    volumes:
+      - ./ingestion/db:/app/db
+    command: python client.py
+    depends_on:
+      - fl_server
+      - ingestion_api
+
+volumes:
+  mosq_data:
+  mosq_logs:

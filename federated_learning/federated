@@ -1,0 +1,107 @@
+import torch
+import torch.nn as nn
+import pandas as pd
+import numpy as np
+from typing import Dict, List, Tuple
+import json
+from datetime import datetime
+import os
+
+class FederatedTrainer:
+    def __init__(self, model_class, data_types=['time_series', 'text', 'image']):
+        self.model_class = model_class
+        self.data_types = data_types
+        self.client_models = {}
+        self.global_model = None
+        self.drift_detector = DataDriftDetector()
+        
+    def initialize_global_model(self):
+        """Initialize global model for all data types"""
+        self.global_model = self.model_class()
+        torch.save(self.global_model.state_dict(), "/app/models/global_model.pth")
+        
+    def client_update(self, client_id: str, data: Dict, epochs: int = 3):
+        """Train client model on local data"""
+        if client_id not in self.client_models:
+            self.client_models[client_id] = self.model_class()
+            self.client_models[client_id].load_state_dict(self.global_model.state_dict())
+        
+        model = self.client_models[client_id]
+        model.train()
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        criterion = nn.CrossEntropyLoss()
+        
+        # Prepare data based on available types
+        for epoch in range(epochs):
+            # Time series data
+            if 'time_series' in data:
+                ts_data = torch.FloatTensor(data['time_series']['features'])
+                ts_labels = torch.LongTensor(data['time_series']['labels'])
+                
+            # Text data (simplified embeddings)
+            if 'text' in data:
+                text_data = torch.FloatTensor(data['text']['embeddings'])
+                text_labels = torch.LongTensor(data['text']['labels'])
+                
+            # Image data (simplified embeddings)
+            if 'image' in data:
+                image_data = torch.FloatTensor(data['image']['embeddings'])
+                image_labels = torch.LongTensor(data['image']['labels'])
+            
+            # Training step (simplified - you'd need proper batching)
+            optimizer.zero_grad()
+            
+            # Use available data types
+            outputs = model(
+                ts_data if 'time_series' in data else torch.zeros(1, 3),
+                text_data if 'text' in data else torch.zeros(1, 128),
+                image_data if 'image' in data else torch.zeros(1, 512)
+            )
+            
+            loss = criterion(outputs, ts_labels)  # Using time series labels as primary
+            loss.backward()
+            optimizer.step()
+            
+        # Check for data drift
+        if 'time_series' in data:
+            drift_result = self.drift_detector.detect_drift(
+                data['time_series']['features'],
+                feature_names=['heart_rate', 'cholesterol', 'blood_pressure']
+            )
+            
+            if drift_result['drift_detected']:
+                print(f"🚨 Data drift detected for client {client_id}")
+                self._handle_data_drift(client_id, drift_result)
+        
+        return model.state_dict()
+    
+    def _handle_data_drift(self, client_id: str, drift_result: Dict):
+        """Handle detected data drift"""
+        # Log drift event
+        drift_log = {
+            "client_id": client_id,
+            "timestamp": datetime.now().isoformat(),
+            "drift_magnitude": drift_result["drift_magnitude"],
+            "affected_features": [
+                feature for feature, result in drift_result["feature_drifts"].items() 
+                if result["drift_detected"]
+            ]
+        }
+        
+        # Save drift log
+        os.makedirs("/app/logs", exist_ok=True)
+        with open(f"/app/logs/drift_{client_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json", "w") as f:
+            json.dump(drift_log, f, indent=2)
+    
+    def aggregate_updates(self, client_updates: Dict[str, Dict]):
+        """Aggregate client updates using Federated Averaging"""
+        global_dict = self.global_model.state_dict()
+        
+        # Average all parameters
+        for key in global_dict.keys():
+            global_dict[key] = torch.stack(
+                [update[key].float() for update in client_updates.values()], 0
+            ).mean(0)
+        
+        self.global_model.load_state_dict(global_dict)
+        torch.save(self.global_model.state_dict(), "/app/models/global_model.pth")
