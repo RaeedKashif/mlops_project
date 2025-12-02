@@ -1,0 +1,66 @@
+# monitoring/prometheus.yml
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+
+rule_files:
+  - "alert.rules.yml"
+
+scrape_configs:
+  # Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+    scrape_interval: 5s
+
+  # Node exporter
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+    scrape_interval: 5s
+
+  # cAdvisor
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+    scrape_interval: 5s
+
+  # Ingestion API
+  - job_name: 'ingestion-api'
+    static_configs:
+      - targets: ['ingestion_api:8001']
+    scrape_interval: 10s
+    metrics_path: '/metrics'
+
+  # MQTT Bridge (via Telegraf)
+  - job_name: 'mqtt-bridge'
+    static_configs:
+      - targets: ['mqtt-bridge:9273']
+    scrape_interval: 10s
+
+  # Federated Learning Server
+  - job_name: 'fl-server'
+    static_configs:
+      - targets: ['fl_server:8081']
+    scrape_interval: 10s
+    metrics_path: '/metrics'
+
+  # Federated Learning Clients
+  - job_name: 'fl-clients'
+    static_configs:
+      - targets: ['fl_client_a:8082', 'fl_client_b:8083']
+    scrape_interval: 10s
+    metrics_path: '/metrics'
+
+  # Streamlit Dashboard
+  - job_name: 'streamlit-dashboard'
+    static_configs:
+      - targets: ['streamlit:8501']
+    scrape_interval: 10s
+    metrics_path: '/metrics'
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']

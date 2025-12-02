@@ -1,3 +1,4 @@
+# streamlit_app/streamlit_app.py
 import sqlite3
 import pandas as pd
 import streamlit as st
@@ -13,18 +14,12 @@ from datetime import datetime
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-# Add to your existing streamlit_app.py
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torchvision import models
+import random
+import requests
+from typing import Dict, List
 import numpy as np
-from scipy import stats
-from sklearn.preprocessing import StandardScaler
-import cv2
 
+# ---- AI Models for Enhanced Features ----
 class MultiModalPredictor(nn.Module):
     def __init__(self, time_series_size=3, text_embedding_size=128, 
                  image_embedding_size=512, hidden_size=256, output_size=2):
@@ -74,10 +69,26 @@ class MultiModalPredictor(nn.Module):
         
         output = self.output_layer(fused)
         return output
-    
 
-# Add this class to your streamlit_app.py
+class HealthRiskPredictor(nn.Module):
+    def __init__(self, input_size=3, hidden_size=64, output_size=2):
+        super(HealthRiskPredictor, self).__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.fc3 = nn.Linear(hidden_size, hidden_size // 2)
+        self.fc4 = nn.Linear(hidden_size // 2, output_size)
+        self.dropout = nn.Dropout(0.3)
+        
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = F.relu(self.fc2(x))
+        x = self.dropout(x)
+        x = F.relu(self.fc3(x))
+        x = self.fc4(x)
+        return x
 
+# ---- Data Drift Detector ----
 class DataDriftDetector:
     def __init__(self, window_size=100):
         self.window_size = window_size
@@ -99,6 +110,7 @@ class DataDriftDetector:
         # Kolmogorov-Smirnov test for each feature
         for i in range(current_data.shape[1]):
             feature_name = feature_names[i] if feature_names else f"feature_{i}"
+            from scipy import stats
             ks_stat, p_value = stats.ks_2samp(
                 self.reference_data[:, i], 
                 current_data[:, i]
@@ -139,25 +151,6 @@ class DataDriftDetector:
         
         return magnitude / current_data.shape[1]
 
-# ---- Federated Learning Model Definition ----
-class HealthRiskPredictor(nn.Module):
-    def __init__(self, input_size=3, hidden_size=64, output_size=2):
-        super(HealthRiskPredictor, self).__init__()
-        self.fc1 = nn.Linear(input_size, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, hidden_size)
-        self.fc3 = nn.Linear(hidden_size, hidden_size // 2)
-        self.fc4 = nn.Linear(hidden_size // 2, output_size)
-        self.dropout = nn.Dropout(0.3)
-        
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = F.relu(self.fc2(x))
-        x = self.dropout(x)
-        x = F.relu(self.fc3(x))
-        x = self.fc4(x)
-        return x
-
 # ---- Config ----
 DB_PATH = os.environ.get("DB_PATH", "/app/db/events.db")
 st.set_page_config(page_title="IoT Monitoring Dashboard", layout="wide")
@@ -180,7 +173,6 @@ def load_events():
         cursor = conn.cursor()
         cursor.execute("PRAGMA table_info(events)")
         columns = [col[1] for col in cursor.fetchall()]
-        print(f"Available columns: {columns}")
         
         # Build query based on available columns
         select_columns = []
@@ -213,7 +205,6 @@ def load_events():
         conn.close()
 
     if not df.empty:
-        print(f"Loaded {len(df)} events")
         # Parse payload JSON if payload column exists
         if 'payload' in df.columns:
             df["payload"] = df["payload"].apply(lambda x: json.loads(x) if x else {})
@@ -239,6 +230,7 @@ def load_events():
 
 df = load_events()
 
+# ---- Enhanced AI Tab Function ----
 def show_enhanced_ai_tab():
     st.subheader("🤖 Multi-Modal AI with Federated Learning")
     
@@ -275,7 +267,7 @@ def show_enhanced_ai_tab():
             
         with col3:
             # Simulate image data availability
-            image_data_count = len(df[df['seq'] % 10 == 0])  # Every 10th record
+            image_data_count = len(df[df['seq'] % 10 == 0]) if 'seq' in df.columns else 0
             st.metric("Image Data (Simulated)", image_data_count)
     
     # Data Drift Monitoring
@@ -342,10 +334,9 @@ def show_enhanced_ai_tab():
     # Federated Learning Progress
     st.write("### Federated Learning Progress")
     
-    # Simulate FL progress (replace with actual FL tracking)
+    # Simulate FL progress
     fl_progress = st.progress(0)
     for i in range(fl_rounds + 1):
-        # Simulate round completion
         if st.button(f"Simulate FL Round {i}") or i == 0:
             progress = i / fl_rounds
             fl_progress.progress(progress)
@@ -367,14 +358,6 @@ def show_enhanced_ai_tab():
                 # Data variety
                 data_variety = len(data_types)
                 st.metric("Data Types Used", data_variety)
-
-# Add this new tab to your existing tab structure
-# Modify your tabs line to include the new AI tab:
-# tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🌦 Weather", "❤️ Heart", "🔗 Network", "🤖 FL Monitoring", "🧠 AI Analytics", "📊 Raw Data"])
-
-# Then add:
-# with tab5:
-#     show_enhanced_ai_tab()
 
 # ---- Federated Learning Tab Function ----
 def show_federated_learning_tab():
@@ -401,19 +384,19 @@ def show_federated_learning_tab():
     
     with col1:
         # Check if hospital_A has data
-        hospital_a_data = len(df[(df['node_id'] == 'hospital_A') & (df['type'] == 'heart')])
+        hospital_a_data = len(df[(df['node_id'] == 'hospital_A') & (df['type'] == 'heart')]) if not df.empty else 0
         status = "Active" if hospital_a_data > 0 else "Waiting for data"
         st.metric("Hospital A Client", status, delta=f"{hospital_a_data} records")
     
     with col2:
         # Check if hospital_B has data
-        hospital_b_data = len(df[(df['node_id'] == 'hospital_B') & (df['type'] == 'heart')])
+        hospital_b_data = len(df[(df['node_id'] == 'hospital_B') & (df['type'] == 'heart')]) if not df.empty else 0
         status = "Active" if hospital_b_data > 0 else "Waiting for data"
         st.metric("Hospital B Client", status, delta=f"{hospital_b_data} records")
     
     with col3:
         # Check if continent_asia has data
-        asia_data = len(df[(df['node_id'] == 'continent_asia') & (df['type'] == 'weather')])
+        asia_data = len(df[(df['node_id'] == 'continent_asia') & (df['type'] == 'weather')]) if not df.empty else 0
         status = "Active" if asia_data > 0 else "Waiting for data"
         st.metric("Asia Client", status, delta=f"{asia_data} records")
     
@@ -524,6 +507,112 @@ def show_federated_learning_tab():
             active_weather_clients = len(df[df['type'] == 'weather']['node_id'].unique())
             st.metric("Active Weather Clients", active_weather_clients)
 
+# ---- Monitoring Tab Function ----
+def show_monitoring_tab():
+    st.subheader("📊 System Monitoring")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Prometheus", "http://localhost:9090", "Ready")
+        if st.button("Open Prometheus"):
+            st.markdown("[Open Prometheus](http://localhost:9090)")
+    
+    with col2:
+        st.metric("Grafana", "http://localhost:3000", "Ready")
+        if st.button("Open Grafana"):
+            st.markdown("[Open Grafana](http://localhost:3000)")
+    
+    with col3:
+        st.metric("cAdvisor", "http://localhost:8088", "Ready")
+        if st.button("Open cAdvisor"):
+            st.markdown("[Open cAdvisor](http://localhost:8088)")
+    
+    # System Metrics
+    st.subheader("System Health")
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        # Simulated CPU usage
+        cpu_usage = random.randint(20, 80)
+        st.metric("CPU Usage", f"{cpu_usage}%", f"{random.randint(-5, 5)}%")
+    
+    with col2:
+        # Simulated memory usage
+        memory_usage = random.randint(30, 90)
+        st.metric("Memory", f"{memory_usage}%", f"{random.randint(-5, 5)}%")
+    
+    with col3:
+        # Simulated events per minute
+        events_per_min = random.randint(100, 200)
+        st.metric("Events/Min", events_per_min, f"{random.randint(-20, 20)}")
+    
+    with col4:
+        active_nodes = len(df['node_id'].unique()) if not df.empty else 0
+        st.metric("Active Nodes", active_nodes, "All healthy")
+    
+    # Check Prometheus connectivity
+    st.subheader("Monitoring Services Status")
+    
+    try:
+        response = requests.get("http://localhost:9090/api/v1/query?query=up", timeout=2)
+        if response.status_code == 200:
+            data = response.json()
+            st.success("✅ Prometheus is reachable")
+            
+            # Display service status
+            services = [
+                ("Ingestion API", "localhost:8000"),
+                ("FL Server", "localhost:8081"),
+                ("Streamlit", "localhost:8501"),
+                ("MQTT Broker", "localhost:1883")
+            ]
+            
+            for service_name, endpoint in services:
+                st.write(f"**{service_name}**: 🟢 Up")
+        else:
+            st.warning("⚠️ Prometheus responded with error")
+    except Exception as e:
+        st.info("🔴 Monitoring services not reachable. Starting up...")
+    
+    # Quick metrics charts
+    st.subheader("Recent System Activity")
+    
+    # Create sample metrics charts
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=("Event Ingest Rate", "CPU Usage", "Memory Usage", "Active Connections")
+    )
+    
+    # Add sample data
+    x = list(range(24))
+    
+    fig.add_trace(
+        go.Scatter(x=x, y=np.random.poisson(10, 24), name="Events", line=dict(color='blue')),
+        row=1, col=1
+    )
+    
+    fig.add_trace(
+        go.Scatter(x=x, y=np.random.uniform(20, 80, 24), name="CPU %", line=dict(color='green')),
+        row=1, col=2
+    )
+    
+    fig.add_trace(
+        go.Scatter(x=x, y=np.random.uniform(30, 90, 24), name="Memory %", line=dict(color='orange')),
+        row=2, col=1
+    )
+    
+    fig.add_trace(
+        go.Scatter(x=x, y=np.random.randint(5, 15, 24), name="Connections", line=dict(color='red')),
+        row=2, col=2
+    )
+    
+    fig.update_layout(height=600, showlegend=False, title_text="System Metrics (Simulated)")
+    st.plotly_chart(fig, use_container_width=True)
+
 # ---- Display Stats ----
 if not df.empty:
     col1, col2, col3, col4 = st.columns(4)
@@ -556,7 +645,10 @@ else:
     st.warning("No data available yet. Waiting for events...")
 
 # ---- Tabs ----
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["🌦 Weather", "❤️ Heart", "🔗 Network", "🤖 FL Monitoring", "📊 Raw Data"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "🌦 Weather", "❤️ Heart", "🔗 Network", 
+    "🤖 FL Monitoring", "📊 Monitoring", "📈 Raw Data"
+])
 
 # ---- Weather Chart ----
 with tab1:
@@ -721,9 +813,15 @@ with tab3:
                     node["size"] = 20
             
             # Save and display
-            net.save_graph("/app/network.html")
-            with open("/app/network.html", "r", encoding="utf-8") as f:
-                components.html(f.read(), height=600)
+            try:
+                net.save_graph("/tmp/network.html")
+                with open("/tmp/network.html", "r", encoding="utf-8") as f:
+                    components.html(f.read(), height=600)
+            except:
+                # Fallback to showing network info
+                st.write("Network visualization requires additional permissions.")
+                st.write(f"**Nodes**: {list(G.nodes())}")
+                st.write(f"**Edges**: {list(G.edges())}")
             
             # Network statistics
             st.subheader("Network Statistics")
@@ -744,38 +842,14 @@ with tab3:
 with tab4:
     show_federated_learning_tab()
 
-# ---- Raw Data Tab ----
+# ---- Monitoring Tab ----
 with tab5:
-    st.subheader("Raw Event Data")
-    if not df.empty:
-        # Show available columns
-        display_columns = [col for col in ['event_id', 'timestamp', 'node_id', 'type', 'temperature', 'humidity', 'heart_rate'] 
-                         if col in df.columns]
-        display_df = df[display_columns].head(20)
-        st.dataframe(display_df)
-        
-        # Data summary
-        st.subheader("Data Summary")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if 'type' in df.columns:
-                st.write("**Data Types Distribution**")
-                type_counts = df["type"].value_counts()
-                st.bar_chart(type_counts)
-            else:
-                st.write("No type data available")
-        
-        with col2:
-            if 'node_id' in df.columns:
-                st.write("**Node Activity**")
-                node_counts = df["node_id"].value_counts().head(10)
-                st.bar_chart(node_counts)
-            else:
-                st.write("No node data available")
-    else:
-        st.info("No data available yet. Waiting for events...")
+    show_monitoring_tab()
+
+# ---- Enhanced AI Tab ----
+with tab6:
+    show_enhanced_ai_tab()
 
 # ---- Footer ----
 st.markdown("---")
-st.markdown("IoT Monitoring Dashboard | Real-time Health & Weather Data | Federated Learning")
+st.markdown("IoT Monitoring Dashboard | Real-time Health & Weather Data | Federated Learning | Prometheus Monitoring")

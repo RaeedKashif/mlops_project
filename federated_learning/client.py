@@ -1,3 +1,4 @@
+# federated_learning/client.py
 import flwr as fl
 import torch
 import torch.nn as nn
@@ -6,6 +7,16 @@ from model import HealthRiskPredictor, WeatherPredictor, get_model_params, set_m
 from utils import get_client_data, HealthDataset, train_model, test_model
 import sys
 import os
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
+import threading
+import time
+
+# Prometheus metrics for FL Client
+CLIENT_TRAINING_ROUNDS = Counter('fl_client_training_rounds_total', 'Client training rounds', ['client_id'])
+CLIENT_EXAMPLES = Counter('fl_client_examples_total', 'Examples processed', ['client_id'])
+CLIENT_LOSS = Gauge('fl_client_loss', 'Client loss', ['client_id'])
+CLIENT_ACCURACY = Gauge('fl_client_accuracy', 'Client accuracy', ['client_id'])
+CLIENT_TRAINING_TIME = Histogram('fl_client_training_time_seconds', 'Client training time', ['client_id'])
 
 class FlowerClient(fl.client.NumPyClient):
     def __init__(self, client_id: str, db_path: str):
@@ -25,6 +36,10 @@ class FlowerClient(fl.client.NumPyClient):
             self.criterion = nn.MSELoss()  # Regression for weather prediction
             self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
         
+        # Start metrics server
+        metrics_port = int(os.getenv("PROMETHEUS_PORT", "8082"))
+        threading.Thread(target=start_http_server, args=(metrics_port,), daemon=True).start()
+        
         print(f"Client {client_id} initialized with {self.model_type} model")
     
     def get_parameters(self, config):
@@ -35,6 +50,7 @@ class FlowerClient(fl.client.NumPyClient):
     
     def fit(self, parameters, config):
         """Train the model on the client's data"""
+        CLIENT_TRAINING_ROUNDS.labels(client_id=self.client_id).inc()
         print(f"Client {self.client_id} starting training...")
         
         # Set model parameters from server
@@ -51,13 +67,17 @@ class FlowerClient(fl.client.NumPyClient):
         dataset = HealthDataset(features, labels)
         train_loader = DataLoader(dataset, batch_size=32, shuffle=True)
         
-        # Train model
+        # Train model with timing
+        start_time = time.time()
         self.model = train_model(
             self.model, train_loader, self.criterion, self.optimizer, self.device, epochs=2
         )
+        training_time = time.time() - start_time
+        CLIENT_TRAINING_TIME.labels(client_id=self.client_id).observe(training_time)
+        CLIENT_EXAMPLES.labels(client_id=self.client_id).inc(len(dataset))
         
         # Return updated parameters
-        print(f"Client {self.client_id} training completed")
+        print(f"Client {self.client_id} training completed in {training_time:.2f}s")
         return self.get_parameters({}), len(dataset), {}
     
     def evaluate(self, parameters, config):
@@ -67,12 +87,18 @@ class FlowerClient(fl.client.NumPyClient):
         features, labels = get_client_data(self.db_path, self.client_id, self.model_type)
         
         if features is None:
+            CLIENT_LOSS.labels(client_id=self.client_id).set(0)
+            CLIENT_ACCURACY.labels(client_id=self.client_id).set(0)
             return 0.0, 0, {"accuracy": 0.0}
         
         dataset = HealthDataset(features, labels)
         test_loader = DataLoader(dataset, batch_size=32, shuffle=False)
         
         loss, accuracy = test_model(self.model, test_loader, self.criterion, self.device)
+        
+        # Update metrics
+        CLIENT_LOSS.labels(client_id=self.client_id).set(loss)
+        CLIENT_ACCURACY.labels(client_id=self.client_id).set(accuracy)
         
         print(f"Client {self.client_id} evaluation - Loss: {loss:.4f}, Accuracy: {accuracy:.2f}%")
         

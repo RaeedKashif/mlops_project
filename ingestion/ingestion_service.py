@@ -1,3 +1,4 @@
+# ingestion/ingestion_service.py
 import os
 import json
 import sqlite3
@@ -10,10 +11,14 @@ import paho.mqtt.client as mqtt
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
+from prometheus_client import Counter, Gauge, Histogram, Summary, generate_latest, CONTENT_TYPE_LATEST, CollectorRegistry
+from starlette.responses import Response
+from starlette.middleware.base import BaseHTTPMiddleware
 
 MQTT_HOST = os.getenv("MQTT_HOST", "mosquitto")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 DB_PATH = os.getenv("DB_PATH", "/app/db/events.db")
+PROMETHEUS_PORT = int(os.getenv("PROMETHEUS_PORT", "8001"))
 
 # Subscribe to all sensor topics including new data types
 TOPIC_FILTERS = [
@@ -27,6 +32,38 @@ TOPIC_FILTERS = [
 ]
 
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
+# Prometheus metrics
+registry = CollectorRegistry()
+
+# Counters
+EVENTS_TOTAL = Counter('ingestion_events_total', 'Total events ingested', ['type', 'node_id', 'category'], registry=registry)
+EVENTS_FAILED = Counter('ingestion_events_failed', 'Failed events', ['reason'], registry=registry)
+DB_INSERTS = Counter('ingestion_db_inserts_total', 'Total database inserts', registry=registry)
+DB_ERRORS = Counter('ingestion_db_errors_total', 'Database errors', ['error_type'], registry=registry)
+MQTT_MESSAGES_RECEIVED = Counter('ingestion_mqtt_messages_total', 'MQTT messages received', ['topic'], registry=registry)
+
+# Gauges
+MQTT_CONNECTED = Gauge('ingestion_mqtt_connected', 'MQTT connection status (1=connected, 0=disconnected)', registry=registry)
+ACTIVE_EVENTS = Gauge('ingestion_active_events', 'Currently active events being processed', registry=registry)
+DATABASE_SIZE = Gauge('ingestion_database_size_bytes', 'Database file size in bytes', registry=registry)
+EVENT_QUEUE_SIZE = Gauge('ingestion_event_queue_size', 'Size of event processing queue', registry=registry)
+
+# Histograms
+EVENT_PROCESSING_TIME = Histogram('ingestion_event_processing_seconds', 'Time to process an event', 
+                                 buckets=[0.001, 0.01, 0.1, 0.5, 1.0, 2.0, 5.0], registry=registry)
+EVENT_SIZE = Histogram('ingestion_event_size_bytes', 'Event payload size in bytes', 
+                      buckets=[100, 500, 1000, 5000, 10000, 50000], registry=registry)
+
+# Health metrics
+HEART_RATE = Gauge('ingestion_heart_rate', 'Heart rate from events', ['node_id'], registry=registry)
+TEMPERATURE = Gauge('ingestion_temperature', 'Temperature from events', ['node_id'], registry=registry)
+HUMIDITY = Gauge('ingestion_humidity', 'Humidity from events', ['node_id'], registry=registry)
+CHOLESTEROL = Gauge('ingestion_cholesterol', 'Cholesterol level', ['node_id'], registry=registry)
+BLOOD_PRESSURE = Gauge('ingestion_blood_pressure', 'Blood pressure', ['node_id'], registry=registry)
+
+# Summary
+API_REQUEST_DURATION = Summary('ingestion_api_request_duration_seconds', 'API request duration', ['endpoint'], registry=registry)
 
 app = FastAPI(title="IoT Ingestion API", version="2.0")
 
@@ -51,6 +88,16 @@ class HealthResponse(BaseModel):
     event_count: int
     database: str
     mqtt_connected: bool
+    error: Optional[str] = None
+
+# Middleware for metrics
+class MetricsMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        with API_REQUEST_DURATION.labels(endpoint=request.url.path).time():
+            response = await call_next(request)
+        return response
+
+app.add_middleware(MetricsMiddleware)
 
 # -------- Database --------
 def init_db():
@@ -164,49 +211,91 @@ def clean_payload(payload: dict) -> dict:
 
 def insert_event(ev: dict):
     """Insert event into database with enhanced error handling"""
-    if not validate_event_data(ev):
-        print(f"❌ Invalid event data, skipping: {ev.get('event_id')}")
-        return False
+    start_time = datetime.now()
+    ACTIVE_EVENTS.inc()
     
     try:
-        with get_db_connection() as conn:
-            c = conn.cursor()
-            
-            # Clean payload before insertion
-            cleaned_payload = clean_payload(ev.get("payload", {}))
-            data_category = categorize_event(ev.get("type"), cleaned_payload)
-            
-            c.execute("""
-                INSERT OR IGNORE INTO events 
-                (event_id, timestamp, node_id, type, seq, payload, target_node, data_category)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                ev.get("event_id"), 
-                ev.get("timestamp"), 
-                ev.get("node_id"), 
-                ev.get("type"), 
-                ev.get("seq"),
-                json.dumps(cleaned_payload, allow_nan=False), 
-                ev.get("target_node"),
-                data_category
-            ))
-            
-            conn.commit()
-            
-            if c.rowcount > 0:
-                print(f"✅ Inserted event: {ev.get('event_id')} - {ev.get('type')} ({data_category})")
-                update_ingestion_stats(conn)
-                return True
-            else:
-                print(f"⚠️ Duplicate event skipped: {ev.get('event_id')}")
-                return False
+        if not validate_event_data(ev):
+            EVENT_SIZE.observe(len(json.dumps(ev)))
+            EVENTS_FAILED.labels(reason="validation").inc()
+            print(f"❌ Invalid event data, skipping: {ev.get('event_id')}")
+            return False
+        
+        with EVENT_PROCESSING_TIME.time():
+            with get_db_connection() as conn:
+                c = conn.cursor()
                 
+                # Clean payload before insertion
+                cleaned_payload = clean_payload(ev.get("payload", {}))
+                data_category = categorize_event(ev.get("type"), cleaned_payload)
+                
+                # Update health metrics if available
+                if ev.get("type") == "heart":
+                    heart_rate = cleaned_payload.get("heart_rate")
+                    cholesterol = cleaned_payload.get("cholesterol")
+                    blood_pressure = cleaned_payload.get("blood_pressure")
+                    
+                    if heart_rate is not None:
+                        HEART_RATE.labels(node_id=ev.get("node_id")).set(heart_rate)
+                    if cholesterol is not None:
+                        CHOLESTEROL.labels(node_id=ev.get("node_id")).set(cholesterol)
+                    if blood_pressure is not None:
+                        BLOOD_PRESSURE.labels(node_id=ev.get("node_id")).set(blood_pressure)
+                
+                elif ev.get("type") == "weather":
+                    temp = cleaned_payload.get("temperature")
+                    humid = cleaned_payload.get("humidity")
+                    
+                    if temp is not None:
+                        TEMPERATURE.labels(node_id=ev.get("node_id")).set(temp)
+                    if humid is not None:
+                        HUMIDITY.labels(node_id=ev.get("node_id")).set(humid)
+                
+                c.execute("""
+                    INSERT OR IGNORE INTO events 
+                    (event_id, timestamp, node_id, type, seq, payload, target_node, data_category)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    ev.get("event_id"), 
+                    ev.get("timestamp"), 
+                    ev.get("node_id"), 
+                    ev.get("type"), 
+                    ev.get("seq"),
+                    json.dumps(cleaned_payload, allow_nan=False), 
+                    ev.get("target_node"),
+                    data_category
+                ))
+                
+                conn.commit()
+                
+                if c.rowcount > 0:
+                    DB_INSERTS.inc()
+                    EVENTS_TOTAL.labels(
+                        type=ev.get("type"), 
+                        node_id=ev.get("node_id"), 
+                        category=data_category
+                    ).inc()
+                    
+                    EVENT_SIZE.observe(len(json.dumps(cleaned_payload)))
+                    print(f"✅ Inserted event: {ev.get('event_id')} - {ev.get('type')} ({data_category})")
+                    update_ingestion_stats(conn)
+                    return True
+                else:
+                    print(f"⚠️ Duplicate event skipped: {ev.get('event_id')}")
+                    return False
+                    
     except sqlite3.IntegrityError as e:
+        DB_ERRORS.labels(error_type="integrity").inc()
         print(f"⚠️ Database integrity error: {e}")
         return False
     except Exception as e:
+        DB_ERRORS.labels(error_type="general").inc()
         print(f"❌ Database error: {e}")
         return False
+    finally:
+        ACTIVE_EVENTS.dec()
+        processing_time = (datetime.now() - start_time).total_seconds()
+        EVENT_PROCESSING_TIME.observe(processing_time)
 
 def update_ingestion_stats(conn):
     """Update ingestion statistics"""
@@ -241,6 +330,7 @@ def update_ingestion_stats(conn):
 def on_connect(client, userdata, flags, rc):
     """Callback for when the client receives a CONNACK response from the server"""
     if rc == 0:
+        MQTT_CONNECTED.set(1)
         print(f"✅ Connected to MQTT broker at {MQTT_HOST}:{MQTT_PORT}")
         
         # Subscribe to all topic filters
@@ -248,10 +338,13 @@ def on_connect(client, userdata, flags, rc):
             client.subscribe(topic)
             print(f"📡 Subscribed to topic: {topic}")
     else:
+        MQTT_CONNECTED.set(0)
         print(f"❌ Failed to connect to MQTT broker, return code: {rc}")
 
 def on_message(client, userdata, msg):
     """Callback for when a PUBLISH message is received from the server"""
+    MQTT_MESSAGES_RECEIVED.labels(topic=msg.topic).inc()
+    
     try:
         payload = json.loads(msg.payload.decode('utf-8'))
         print(f"📨 Received message on topic {msg.topic}")
@@ -263,17 +356,22 @@ def on_message(client, userdata, msg):
         
         success = insert_event(payload)
         if not success:
+            EVENTS_FAILED.labels(reason="insertion").inc()
             print(f"⚠️ Failed to process event from topic: {msg.topic}")
             
     except json.JSONDecodeError as e:
+        EVENTS_FAILED.labels(reason="json_decode").inc()
         print(f"❌ JSON decode error in topic {msg.topic}: {e}")
     except UnicodeDecodeError as e:
+        EVENTS_FAILED.labels(reason="unicode_decode").inc()
         print(f"❌ Unicode decode error in topic {msg.topic}: {e}")
     except Exception as e:
+        EVENTS_FAILED.labels(reason="general").inc()
         print(f"❌ Error processing message from {msg.topic}: {e}")
 
 def on_disconnect(client, userdata, rc):
     """Callback for when the client disconnects from the broker"""
+    MQTT_CONNECTED.set(0)
     if rc != 0:
         print(f"⚠️ Unexpected MQTT disconnection, return code: {rc}")
         # Attempt to reconnect
@@ -477,7 +575,7 @@ def health():
             service="ingestion_api",
             event_count=count,
             database=db_status,
-            mqtt_connected=True  # This would need actual MQTT connection check
+            mqtt_connected=bool(MQTT_CONNECTED._value.get())
         )
     except Exception as e:
         return HealthResponse(
@@ -489,6 +587,24 @@ def health():
             error=str(e)
         )
 
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics endpoint"""
+    try:
+        with get_db_connection() as conn:
+            c = conn.cursor()
+            c.execute("SELECT COUNT(*) FROM events")
+            total_events = c.fetchone()[0]
+            ACTIVE_EVENTS.set(total_events)
+            
+            # Update database size
+            if os.path.exists(DB_PATH):
+                DATABASE_SIZE.set(os.path.getsize(DB_PATH))
+    except Exception:
+        pass
+    
+    return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
+
 @app.get("/")
 def root():
     """Root endpoint with service information"""
@@ -499,7 +615,8 @@ def root():
         "endpoints": {
             "events": "/events",
             "events_stats": "/events/stats", 
-            "health": "/health"
+            "health": "/health",
+            "metrics": "/metrics"
         },
         "supported_data_types": [
             "weather", "heart", "text", "image", 
@@ -507,14 +624,6 @@ def root():
             "vertical"
         ]
     }
-
-# -------- Error Handlers --------
-@app.exception_handler(500)
-async def internal_server_error_handler(request, exc):
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal server error", "error": str(exc)}
-    )
 
 if __name__ == "__main__":
     import uvicorn
