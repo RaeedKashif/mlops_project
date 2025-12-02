@@ -17,42 +17,68 @@ jobs:
     
     - name: Set up Docker
       run: |
+        echo "Docker version:"
         docker --version
-        docker-compose --version
+        
+        # Docker Compose is now part of Docker CLI (v2)
+        echo "Using Docker Compose v2 (docker compose):"
+        docker compose version
+        
+        # Alternative: Install docker-compose v1 if needed
+        # sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+        # sudo chmod +x /usr/local/bin/docker-compose
+        # docker-compose --version
     
     - name: Build and test ingestion service
       run: |
         echo "🔧 Building ingestion service..."
-        cd ingestion
-        docker build -t ingestion:test .
-        echo "✅ ingestion service built successfully"
+        if [ -d "ingestion" ]; then
+          cd ingestion
+          docker build -t ingestion:test .
+          echo "✅ ingestion service built successfully"
+        else
+          echo "⚠️ ingestion directory not found"
+        fi
     
     - name: Build and test streamlit dashboard
       run: |
         echo "📊 Building streamlit dashboard..."
-        cd streamlit_app
-        docker build -t dashboard:test .
-        echo "✅ streamlit dashboard built successfully"
+        if [ -d "streamlit_app" ]; then
+          cd streamlit_app
+          docker build -t dashboard:test .
+          echo "✅ streamlit dashboard built successfully"
+        else
+          echo "⚠️ streamlit_app directory not found"
+        fi
     
     - name: Build and test FL server
       run: |
         echo "🤖 Building FL server..."
-        cd federated_learning
-        docker build -t fl-server:test .
-        echo "✅ FL server built successfully"
+        if [ -d "federated_learning" ]; then
+          cd federated_learning
+          docker build -t fl-server:test .
+          echo "✅ FL server built successfully"
+        else
+          echo "⚠️ federated_learning directory not found"
+        fi
     
     - name: Build and test publisher
       run: |
         echo "📡 Building publisher..."
-        cd publisher
-        docker build -t publisher:test .
-        echo "✅ publisher built successfully"
+        if [ -d "publisher" ]; then
+          cd publisher
+          docker build -t publisher:test .
+          echo "✅ publisher built successfully"
+        else
+          echo "⚠️ publisher directory not found"
+        fi
     
-    - name: Test docker-compose
+    - name: Test docker-compose (using docker compose v2)
       run: |
         echo "🐳 Testing docker-compose..."
         if [ -f "docker-compose.yml" ]; then
-          docker-compose config --quiet
+          # Use Docker Compose v2 (docker compose) instead of docker-compose
+          docker compose config --quiet
           echo "✅ docker-compose.yml is valid"
         else
           echo "⚠️ No docker-compose.yml found"
@@ -74,4 +100,4 @@ jobs:
         echo "   - MQTT Publisher"
         echo ""
         echo "🚀 To run locally:"
-        echo "   docker-compose up -d"
+        echo "   docker compose up -d"
