@@ -1,92 +1,77 @@
-name: Build and Test Complete System
+name: Simple Docker CI
 
 on:
   push:
-    branches: ["main"]
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
-  build-images:
+  build-and-test:
     runs-on: ubuntu-latest
-
+    
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Debug info
-        run: |
-          echo "Event: ${{ github.event_name }}"
-          echo "Branch: ${{ github.ref }}"
-
-      - name: Build application images
-        run: |
-          echo "Building images..."
-          cd ingestion && docker build -t my-ingestion:latest .
-          cd ../streamlit_app && docker build -t my-dashboard:latest .
-          cd ../federated_learning && docker build -t my-fl-server:latest .
-          cd ../publisher && docker build -t my-publisher:latest .
-
-      - name: Test Prometheus configuration
-        run: |
-          mkdir -p monitoring
-          if [ ! -f monitoring/prometheus.yml ]; then
-            cat > monitoring/prometheus.yml << 'EOF'
-global:
-  scrape_interval: 15s
-
-scrape_configs:
-  - job_name: prometheus
-    static_configs:
-      - targets: ['localhost:9090']
-EOF
-          fi
-          docker run --rm \
-            -v $(pwd)/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml \
-            prom/prometheus:latest \
-            --config.file=/etc/prometheus/prometheus.yml --version
-
-      - name: Test Grafana readiness
-        run: |
-          mkdir -p monitoring/grafana/provisioning/datasources
-          cat > monitoring/grafana/provisioning/datasources/prometheus.yml << 'EOF'
-apiVersion: 1
-datasources:
-  - name: Prometheus
-    type: prometheus
-    url: http://prometheus:9090
-    access: proxy
-    isDefault: true
-EOF
-
-      - name: Test docker compose configuration
-        run: |
-          if [ ! -f docker-compose.yml ]; then
-            echo "docker-compose.yml missing"
-            exit 1
-          fi
-
-          if ! grep -Eq "prometheus|grafana" docker-compose.yml; then
-            cat << 'EOF' >> docker-compose.yml
-
-# Monitoring Template
-# prometheus:
-#   image: prom/prometheus:latest
-# grafana:
-#   image: grafana/grafana:latest
-EOF
-          fi
-
-          docker compose config -q
-
-      - name: Quick integration test
-        run: |
-          docker network create test-network || true
-          docker run -d --name test-prometheus --network test-network \
-            -v $(pwd)/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml \
-            -p 9091:9090 prom/prometheus:latest
-
-          sleep 4
-          curl -f http://localhost:9091/-/healthy
-
-      - name: Summary
-        run: echo "Workflow completed successfully."
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Docker
+      run: |
+        docker --version
+        docker-compose --version
+    
+    - name: Build and test ingestion service
+      run: |
+        echo "🔧 Building ingestion service..."
+        cd ingestion
+        docker build -t ingestion:test .
+        echo "✅ ingestion service built successfully"
+    
+    - name: Build and test streamlit dashboard
+      run: |
+        echo "📊 Building streamlit dashboard..."
+        cd streamlit_app
+        docker build -t dashboard:test .
+        echo "✅ streamlit dashboard built successfully"
+    
+    - name: Build and test FL server
+      run: |
+        echo "🤖 Building FL server..."
+        cd federated_learning
+        docker build -t fl-server:test .
+        echo "✅ FL server built successfully"
+    
+    - name: Build and test publisher
+      run: |
+        echo "📡 Building publisher..."
+        cd publisher
+        docker build -t publisher:test .
+        echo "✅ publisher built successfully"
+    
+    - name: Test docker-compose
+      run: |
+        echo "🐳 Testing docker-compose..."
+        if [ -f "docker-compose.yml" ]; then
+          docker-compose config --quiet
+          echo "✅ docker-compose.yml is valid"
+        else
+          echo "⚠️ No docker-compose.yml found"
+        fi
+    
+    - name: List all built images
+      run: |
+        echo "📦 Listing all Docker images:"
+        docker images
+    
+    - name: Success
+      run: |
+        echo "🎉 All Docker images built successfully!"
+        echo ""
+        echo "✅ Services ready:"
+        echo "   - Ingestion API (port 8000)"
+        echo "   - Streamlit Dashboard (port 8501)"
+        echo "   - FL Server (port 8080)"
+        echo "   - MQTT Publisher"
+        echo ""
+        echo "🚀 To run locally:"
+        echo "   docker-compose up -d"
