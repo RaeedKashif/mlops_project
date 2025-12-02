@@ -2,11 +2,8 @@ name: Build and Test Complete System
 
 on:
   push:
-    branches: [main]
+    branches: ["main"]
   workflow_dispatch:
-
-permissions:
-  contents: read
 
 jobs:
   build-images:
@@ -18,208 +15,78 @@ jobs:
 
       - name: Debug info
         run: |
-          echo "✅ Workflow started!"
           echo "Event: ${{ github.event_name }}"
           echo "Branch: ${{ github.ref }}"
-          echo "Repository: ${{ github.repository }}"
 
       - name: Build application images
         run: |
-          echo "🚀 Building application images..."
-
-          echo "📦 Building ingestion service..."
-          cd ingestion
-          docker build -t my-ingestion:latest .
-
-          echo "📊 Building dashboard..."
-          cd ../streamlit_app
-          docker build -t my-dashboard:latest .
-
-          echo "🤖 Building FL server..."
-          cd ../federated_learning
-          docker build -t my-fl-server:latest .
-
-          echo "📡 Building publisher..."
-          cd ../publisher
-          docker build -t my-publisher:latest .
-
-          echo "✅ All application images built successfully!"
+          echo "Building images..."
+          cd ingestion && docker build -t my-ingestion:latest .
+          cd ../streamlit_app && docker build -t my-dashboard:latest .
+          cd ../federated_learning && docker build -t my-fl-server:latest .
+          cd ../publisher && docker build -t my-publisher:latest .
 
       - name: Test Prometheus configuration
         run: |
-          echo "🔍 Testing Prometheus configuration..."
-
-          if [ -f "monitoring/prometheus.yml" ]; then
-            echo "✅ Found prometheus.yml"
-            cat monitoring/prometheus.yml
-
-            docker run --rm \
-              -v $(pwd)/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml \
-              prom/prometheus:latest \
-              --config.file=/etc/prometheus/prometheus.yml --version
-
-            echo "✅ Prometheus config syntax is valid"
-          else
-            echo "⚠️ No monitoring/prometheus.yml found, creating sample..."
-            mkdir -p monitoring
-
+          mkdir -p monitoring
+          if [ ! -f monitoring/prometheus.yml ]; then
             cat > monitoring/prometheus.yml << 'EOF'
 global:
   scrape_interval: 15s
-  evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: 'prometheus'
+  - job_name: prometheus
     static_configs:
       - targets: ['localhost:9090']
-
-  - job_name: 'ingestion-api'
-    static_configs:
-      - targets: ['ingestion_api:8001']
-    metrics_path: '/metrics'
-    scrape_interval: 10s
-
-  - job_name: 'fl-server'
-    static_configs:
-      - targets: ['fl_server:8081']
-    metrics_path: '/metrics'
-    scrape_interval: 10s
-
-  - job_name: 'node-exporter'
-    static_configs:
-      - targets: ['node-exporter:9100']
-    scrape_interval: 5s
 EOF
-            echo "✅ Created sample prometheus.yml"
           fi
+          docker run --rm \
+            -v $(pwd)/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml \
+            prom/prometheus:latest \
+            --config.file=/etc/prometheus/prometheus.yml --version
 
       - name: Test Grafana readiness
         run: |
-          echo "📈 Testing Grafana setup..."
-
           mkdir -p monitoring/grafana/provisioning/datasources
-          mkdir -p monitoring/grafana/provisioning/dashboards
-
           cat > monitoring/grafana/provisioning/datasources/prometheus.yml << 'EOF'
 apiVersion: 1
-
 datasources:
   - name: Prometheus
     type: prometheus
-    access: proxy
     url: http://prometheus:9090
+    access: proxy
     isDefault: true
-    editable: true
 EOF
-
-          echo "✅ Grafana configuration prepared"
 
       - name: Test docker compose configuration
         run: |
-          echo "🐳 Testing docker compose setup..."
+          if [ ! -f docker-compose.yml ]; then
+            echo "docker-compose.yml missing"
+            exit 1
+          fi
 
-          if [ -f "docker-compose.yml" ]; then
-            echo "✅ Found docker-compose.yml"
+          if ! grep -Eq "prometheus|grafana" docker-compose.yml; then
+            cat << 'EOF' >> docker-compose.yml
 
-            if grep -Eq "prometheus|grafana|monitoring" docker-compose.yml; then
-              echo "✅ Monitoring services found in docker-compose.yml"
-            else
-              echo "⚠️ No monitoring services found, adding template..."
-
-              cat << 'EOF' >> docker-compose.yml
-
-# Monitoring Services (uncomment to enable)
-#  prometheus:
-#    image: prom/prometheus:latest
-#    ports:
-#      - "9090:9090"
-#    volumes:
-#      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
-#      - prometheus_data:/prometheus
-#    command:
-#      - '--config.file=/etc/prometheus/prometheus.yml'
-#      - '--storage.tsdb.path=/prometheus'
-#
-#  grafana:
-#    image: grafana/grafana:latest
-#    ports:
-#      - "3000:3000"
-#    environment:
-#      - GF_SECURITY_ADMIN_USER=admin
-#      - GF_SECURITY_ADMIN_PASSWORD=admin123
-#    volumes:
-#      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
-#
-#volumes:
-#  prometheus_data:
-#  grafana_data:
+# Monitoring Template
+# prometheus:
+#   image: prom/prometheus:latest
+# grafana:
+#   image: grafana/grafana:latest
 EOF
-              echo "✅ Monitoring template added"
-            fi
-
-            docker compose config -q && echo "✅ docker compose syntax is valid"
-          else
-            echo "❌ No docker-compose.yml found"
           fi
 
-      - name: Verify metrics endpoints in code
+          docker compose config -q
+
+      - name: Quick integration test
         run: |
-          echo "🔬 Checking if services expose Prometheus metrics..."
-
-          echo "Checking ingestion..."
-          if grep -q "/metrics" ingestion/ingestion_service.py; then
-            echo "✅ ingestion_service.py has /metrics endpoint"
-          else
-            echo "⚠️ ingestion_service.py missing /metrics"
-          fi
-
-          echo "Checking FL server..."
-          if grep -Eq "prometheus_client|start_http_server" federated_learning/server.py; then
-            echo "✅ FL server metrics enabled"
-          else
-            echo "⚠️ FL server missing metrics"
-          fi
-
-          echo "Checking Dockerfiles..."
-          for service in ingestion federated_learning; do
-            if [ -f "$service/Dockerfile" ]; then
-              if grep -Eq "EXPOSE.*(8001|8081)" "$service/Dockerfile"; then
-                echo "✅ $service Dockerfile exposes metrics port"
-              else
-                echo "⚠️ $service Dockerfile does not expose metrics port"
-              fi
-            fi
-          done
-
-      - name: Run quick integration test
-        run: |
-          echo "🧪 Running integration test..."
-
-          docker network create test-network 2>/dev/null || true
-
-          docker run -d --name test-prometheus \
-            --network test-network \
-            -p 9091:9090 \
+          docker network create test-network || true
+          docker run -d --name test-prometheus --network test-network \
             -v $(pwd)/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml \
-            prom/prometheus:latest
+            -p 9091:9090 prom/prometheus:latest
 
-          docker run -d --name test-metrics \
-            --network test-network \
-            -p 9999:8000 \
-            python:3.9-slim \
-            sh -c "pip install prometheus-client && python -c \"from prometheus_client import start_http_server, Counter; c = Counter('test_counter','Test'); c.inc(); start_http_server(8000)\""
+          sleep 4
+          curl -f http://localhost:9091/-/healthy
 
-          sleep 5
-
-          curl -s http://localhost:9091/-/healthy > /dev/null && echo "✅ Prometheus OK" || echo "❌ Prometheus FAILED"
-          curl -s http://localhost:9999/metrics > /dev/null && echo "✅ Metrics endpoint OK" || echo "❌ Metrics FAILED"
-
-          docker rm -f test-prometheus test-metrics 2>/dev/null || true
-          docker network rm test-network 2>/dev/null || true
-
-      - name: Generate summary report
-        run: |
-          echo "📊 ========================================="
-          echo "📊 BUILD AND MONITORING TEST SUMMARY"
-          echo "📊 ========================================="
-          echo "Summary generated."
+      - name: Summary
+        run: echo "Workflow completed successfully."
